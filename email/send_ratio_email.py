@@ -211,7 +211,7 @@ def main() -> int:
     if force_date:
         print(f"[FORCE] 跳过交易日检测, 用最新交易日 {latest_date} 的数据")
         today_str = latest_date  # 用最新交易日作为标题日期
-        now_bj = now_bj.replace(day=int(latest_date[8:10]), month=int(latest_date[5:7]))
+        now_bj = datetime.strptime(latest_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)  # 星期也按该交易日
     elif latest_date != today_str:
         print(f"最新K线日期 {latest_date}, 今天 {today_str} → 非交易日(或数据未更新), 跳过发送")
         return 0

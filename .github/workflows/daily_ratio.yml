@@ -21,6 +21,7 @@ jobs:
 
       - name: 生成并发送邮件 (纯标准库, 无需安装依赖)
         env:
+          MAIL_FORCE_DATE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}  # 手动触发=强制用最新交易日发测试信
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_AUTH_CODE: ${{ secrets.MAIL_AUTH_CODE }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
