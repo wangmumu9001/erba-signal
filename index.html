@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>二八择时仪表盘 · 创业板/中证红利</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  :root {
+    --blue: #2a78d6; --orange: #eb6834; --green: #1baf7a; --yellow: #eda100; --red: #e34948;
+    --ink: #0b0b0b; --sec: #52514e; --muted: #898781;
+    --surface: #fcfcfb; --card: #ffffff; --grid: #e1e0d9; --axis: #c3c2b7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
+    background: var(--surface); color: var(--ink); line-height: 1.5;
+    padding-bottom: 40px;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+  header {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding: 28px 0 18px; border-bottom: 2px solid var(--ink);
+  }
+  header h1 { font-size: 22px; font-weight: 700; letter-spacing: .5px; }
+  header .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  header .update { font-size: 12px; color: var(--muted); text-align: right; }
+  header .update b { color: var(--sec); font-weight: 600; }
+
+  /* 主卡 */
+  .hero {
+    display: flex; align-items: center; gap: 28px;
+    background: var(--card); border: 1px solid var(--grid);
+    border-radius: 12px; padding: 22px 26px; margin: 20px 0;
+  }
+  .hero .big { flex: 1; }
+  .hero .big .label { font-size: 13px; color: var(--muted); }
+  .hero .big .value {
+    font-size: 52px; font-weight: 700; letter-spacing: -1px; font-variant-numeric: tabular-nums;
+  }
+  .hero .big .chg { font-size: 15px; font-weight: 600; margin-top: 2px; }
+  .up { color: var(--red); } .down { color: var(--green); }   /* A股红涨绿跌 */
+  .badge {
+    font-size: 15px; font-weight: 700; color: #fff;
+    border-radius: 20px; padding: 8px 18px; white-space: nowrap;
+  }
+  .hero .tip { margin-top: 10px; font-size: 13px; color: var(--sec); max-width: 420px; }
+
+  /* 指标网格 */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--grid);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .card .k { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .card .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .s { font-size: 12px; color: var(--sec); margin-top: 2px; }
+
+  /* 分位条 */
+  .bar-wrap { display: flex; align-items: center; gap: 10px; }
+  .bar {
+    flex: 1; height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden;
+  }
+  .bar i { display: block; height: 100%; border-radius: 4px; background: var(--blue); }
+  .pct { font-size: 14px; font-weight: 700; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* 策略信号 */
+  .signal-card { display: flex; flex-direction: column; gap: 14px; }
+  .sig-row { display: flex; align-items: center; gap: 14px; }
+  .sig-row .name { width: 130px; font-size: 13px; color: var(--sec); flex-shrink: 0; }
+  .sig-row .bars { flex: 1; display: flex; height: 16px; border-radius: 4px; overflow: hidden; }
+  .sig-row .bars .seg { display: flex; align-items: center; justify-content: center; color: #fff;
+    font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; }
+  .sig-row .legend { font-size: 11px; color: var(--muted); }
+
+  /* 图 */
+  .chart-card {
+    background: var(--card); border: 1px solid var(--grid);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .chart-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+  #chart-ratio { height: 380px; width: 100%; }
+  #chart-position { height: 220px; width: 100%; }
+
+  footer {
+    margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--grid);
+    font-size: 12px; color: var(--muted); text-align: center;
+  }
+
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: repeat(2, 1fr); }
+    .hero { flex-direction: column; align-items: flex-start; gap: 14px; }
+    .hero .big .value { font-size: 44px; }
+    .sig-row .name { width: 100px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>二八择时仪表盘</h1>
+      <div class="sub">创业板指 / 中证红利 · 成长 vs 红利风格轮动</div>
+    </div>
+    <div class="update">
+      数据更新：<b id="m-generated">…</b><br>
+      数据截至：<b id="m-latest">…</b> · 来源 <span id="m-source">…</span>
+    </div>
+  </header>
+
+  <!-- 主卡 -->
+  <div class="hero">
+    <div class="big">
+      <div class="label">当前比值（创业板 / 中证红利）</div>
+      <div class="value" id="ratio-value">—</div>
+      <div class="chg" id="ratio-chg">—</div>
+    </div>
+    <div class="badge" id="zone-badge">…</div>
+    <div class="tip" id="zone-tip">…</div>
+  </div>
+
+  <!-- 指标网格 -->
+  <div class="grid">
+    <div class="card"><div class="k">创业板指</div><div class="v" id="m-cyb">—</div><div class="s" id="s-cyb"></div></div>
+    <div class="card"><div class="k">中证红利</div><div class="v" id="m-hdl">—</div><div class="s" id="s-hdl"></div></div>
+    <div class="card"><div class="k">比值 MA20</div><div class="v" id="m-ma20">—</div><div class="s" id="s-ma20"></div></div>
+    <div class="card"><div class="k">近1年分位</div>
+      <div class="bar-wrap"><div class="bar"><i id="b-1y"></i></div><span class="pct" id="p-1y">—</span></div></div>
+    <div class="card"><div class="k">近3年分位</div>
+      <div class="bar-wrap"><div class="bar"><i id="b-3y"></i></div><span class="pct" id="p-3y">—</span></div></div>
+    <div class="card"><div class="k">全历史分位</div>
+      <div class="bar-wrap"><div class="bar"><i id="b-all"></i></div><span class="pct" id="p-all">—</span></div></div>
+  </div>
+
+  <!-- 策略信号 -->
+  <div class="card signal-card" style="margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:700;">当前策略仓位建议</div>
+    <div class="sig-row">
+      <div class="name">原版规则 (20/80)</div>
+      <div class="bars">
+        <div class="seg" id="seg-orig-c" style="background:var(--blue)">…</div>
+        <div class="seg" id="seg-orig-h" style="background:#c3c2b7">…</div>
+      </div>
+      <div class="legend">创业板 / 红利</div>
+    </div>
+    <div class="sig-row">
+      <div class="name">清仓版规则 (0/100)</div>
+      <div class="bars">
+        <div class="seg" id="seg-clear-c" style="background:var(--orange)">…</div>
+        <div class="seg" id="seg-clear-h" style="background:#c3c2b7">…</div>
+      </div>
+      <div class="legend">创业板 / 红利</div>
+    </div>
+  </div>
+
+  <!-- 图表 -->
+  <div class="chart-card">
+    <h3>比值走势（近5年） · 带滞回阈值带（>0.6 防守 / &lt;0.4 进攻）</h3>
+    <div id="chart-ratio"></div>
+  </div>
+  <div class="chart-card">
+    <h3>策略创业板仓位（近5年）</h3>
+    <div id="chart-position"></div>
+  </div>
+
+  <footer>
+    数据来源：东方财富 / 腾讯财经（自动切换）· 策略仅供参考，不构成投资建议<br>
+    本页面由 GitHub Actions 每个交易日自动更新
+  </footer>
+</div>
+
+<script>
+const COLORS = { blue: "#2a78d6", orange: "#eb6834", green: "#1baf7a",
+                 yellow: "#eda100", red: "#e34948", grid: "#e1e0d9",
+                 axis: "#c3c2b7", ink: "#0b0b0b", sec: "#52514e", muted: "#898781" };
+const ZONE_COLOR = { defense: COLORS.red, hold: COLORS.yellow, attack: COLORS.green };
+const ZONE_CN = { defense: "🔴 防守区间", hold: "🟡 滞回区间", attack: "🟢 进攻区间" };
+
+const $ = id => document.getElementById(id);
+const fmt = (v, d=4) => (v ?? "—").toLocaleString("zh-CN", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmt2 = v => (v ?? "—").toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt1 = v => (v ?? "—").toLocaleString("zh-CN", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+async function load() {
+  const resp = await fetch("data.json");
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  return resp.json();
+}
+
+function render(d) {
+  // 顶部
+  $("m-generated").textContent = d.generated;
+  $("m-latest").textContent = d.latest_date;
+  $("m-source").textContent = d.source;
+
+  // 主卡
+  $("ratio-value").textContent = fmt(d.ratio, 4);
+  const chg = d.ratio_chg;
+  $("ratio-chg").textContent = (chg >= 0 ? "+" : "") + fmt2(chg) + "%";
+  $("ratio-chg").className = "chg " + (chg >= 0 ? "up" : "down");
+  const badge = $("zone-badge");
+  badge.textContent = ZONE_CN[d.zone];
+  badge.style.background = ZONE_COLOR[d.zone];
+  const tips = {
+    defense: `比值 ${fmt(d.ratio)} &gt; 0.6，成长相对红利偏贵，策略处于防守：减仓创业板，以红利为主（清仓版 = 0% 创业板）。等待比值跌破 ${d.thr_lo} 才重新进攻。`,
+    hold: `比值处于 0.4 ~ 0.6 滞回带，策略维持前一持仓不动，避免频繁切换。`,
+    attack: `比值 &lt; 0.4，成长处于历史低位，策略进攻：随比值下降渐进加仓创业板至 80%（越跌越买）。`
+  };
+  $("zone-tip").innerHTML = tips[d.zone];
+
+  // 指标卡
+  $("m-cyb").textContent = fmt2(d.cyb);
+  $("m-hdl").textContent = fmt2(d.hdl);
+  $("m-ma20").textContent = fmt(d.ma20, 4);
+  $("s-ma20").textContent = d.ratio >= d.ma20 ? "比值在 MA20 上方" : "比值在 MA20 下方";
+  // 分位条
+  const setBar = (id, pct) => {
+    $(id).style.width = pct + "%";
+  };
+  $("p-1y").textContent = fmt1(d.pct_1y) + "%";
+  $("p-3y").textContent = fmt1(d.pct_3y) + "%";
+  $("p-all").textContent = fmt1(d.pct_all) + "%";
+  setBar("b-1y", d.pct_1y); setBar("b-3y", d.pct_3y); setBar("b-all", d.pct_all);
+
+  // 策略信号
+  const setSeg = (seg, w, label, color) => {
+    const el = $(seg);
+    el.style.width = (w * 100) + "%";
+    el.textContent = (w > 0.03 ? (w * 100).toFixed(0) + "%" : "");
+    el.style.background = color;
+  };
+  setSeg("seg-orig-c", d.w_original, "", COLORS.blue);
+  setSeg("seg-orig-h", 1 - d.w_original, "", "#c3c2b7");
+  setSeg("seg-clear-c", d.w_clear, "", COLORS.orange);
+  setSeg("seg-clear-h", 1 - d.w_clear, "", "#c3c2b7");
+
+  // 图表1: 比值走势
+  const dates = d.history.map(h => h.date);
+  const ratios = d.history.map(h => h.ratio);
+  const ch1 = echarts.init($("chart-ratio"));
+  ch1.setOption({
+    animation: false,
+    tooltip: { trigger: "axis", valueFormatter: v => fmt(v, 4) },
+    grid: { left: 8, right: 16, top: 30, bottom: 8, containLabel: true },
+    xAxis: { type: "category", data: dates, axisLine: { lineStyle: { color: COLORS.axis } },
+             axisLabel: { color: COLORS.muted, fontSize: 11 }, axisTick: { show: false } },
+    yAxis: { type: "value", scale: true, axisLine: { show: false },
+             axisLabel: { color: COLORS.muted, fontSize: 11 },
+             splitLine: { lineStyle: { color: COLORS.grid } } },
+    series: [{
+      name: "比值", type: "line", data: ratios, showSymbol: false, smooth: true,
+      lineStyle: { width: 2, color: COLORS.blue },
+      areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1,
+        colorStops: [{ offset: 0, color: "rgba(42,120,214,0.25)" },
+                     { offset: 1, color: "rgba(42,120,214,0.02)" }] } },
+      markArea: {
+        silent: true, itemStyle: { color: "rgba(227,73,72,0.06)" },
+        data: [[{ yAxis: d.thr_hi }, { yAxis: 1.0 }]],
+        label: { show: true, position: "insideTopRight", color: COLORS.muted, fontSize: 10,
+                 formatter: "防守区 >0.6" }
+      },
+      markLine: {
+        symbol: "none", label: { fontSize: 10, color: COLORS.muted, position: "insideEndTop" },
+        data: [
+          { yAxis: d.thr_hi, lineStyle: { color: COLORS.red, type: "dashed", width: 1.2 }, label: { formatter: "0.6" } },
+          { yAxis: d.thr_lo, lineStyle: { color: COLORS.green, type: "dashed", width: 1.2 }, label: { formatter: "0.4" } }
+        ]
+      },
+      markPoint: {
+        symbol: "circle", symbolSize: 10,
+        data: [{ coord: [dates[dates.length - 1], d.ratio],
+                 itemStyle: { color: COLORS.blue, borderColor: "#fff", borderWidth: 2 },
+                 label: { formatter: fmt(d.ratio, 4), position: "top", color: COLORS.blue, fontSize: 11, fontWeight: 600 } }]
+      }
+    }]
+  });
+
+  // 图表2: 策略仓位
+  const wo = d.history.map(h => h.wo);
+  const wc = d.history.map(h => h.wc);
+  const ch2 = echarts.init($("chart-position"));
+  ch2.setOption({
+    animation: false,
+    tooltip: { trigger: "axis", valueFormatter: v => (v * 100).toFixed(0) + "%" },
+    legend: { top: 0, data: ["原版(20/80)", "清仓版(0/100)"], textStyle: { color: COLORS.sec, fontSize: 11 } },
+    grid: { left: 8, right: 16, top: 28, bottom: 8, containLabel: true },
+    xAxis: { type: "category", data: dates, axisLine: { lineStyle: { color: COLORS.axis } },
+             axisLabel: { color: COLORS.muted, fontSize: 11 }, axisTick: { show: false } },
+    yAxis: { type: "value", min: 0, max: 1,
+             axisLabel: { color: COLORS.muted, fontSize: 11, formatter: v => (v * 100) + "%" },
+             splitLine: { lineStyle: { color: COLORS.grid } }, axisLine: { show: false } },
+    series: [
+      { name: "原版(20/80)", type: "line", data: wo, showSymbol: false, smooth: true,
+        lineStyle: { width: 1.6, color: COLORS.blue },
+        areaStyle: { color: "rgba(42,120,214,0.12)" } },
+      { name: "清仓版(0/100)", type: "line", data: wc, showSymbol: false, smooth: true,
+        lineStyle: { width: 1.6, color: COLORS.orange },
+        areaStyle: { color: "rgba(235,104,52,0.10)" } }
+    ]
+  });
+}
+
+load().then(d => render(d)).catch(e => {
+  document.querySelector(".hero").innerHTML =
+    `<div style="padding:30px;color:#e34948;font-size:14px;">⚠️ 数据加载失败：${e.message}<br>
+     <span style="color:#52514e;">请确认 data.json 存在，并用本地服务器打开（见 README）。</span></div>`;
+});
+</script>
+</body>
+</html>

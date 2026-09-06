@@ -1,0 +1,27 @@
+name: 二八择时日报
+
+# 每天北京时间 16:00 (UTC 08:00) 发送, 周一至周五; A股休市由脚本自动跳过
+on:
+  schedule:
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  send-ratio-email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 生成并发送邮件 (纯标准库, 无需安装依赖)
+        env:
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_AUTH_CODE: ${{ secrets.MAIL_AUTH_CODE }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python email/send_ratio_email.py
