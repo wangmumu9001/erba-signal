@@ -214,6 +214,16 @@ def mark_sent(sent_file: str, data_date: str) -> None:
 
 # ---------------- 主流程 ----------------
 def main() -> int:
+    # 0. 定时阶梯闸门 —— schedule 触发若早于北京 08:00, 直接跳过, 让给当天更晚的那条定时。
+    #    (GitHub 的 cron 会推迟数小时才启动, 阶梯靠这道闸门把"第一个过了 8 点"的那次留下;
+    #     落在 8 点前的会被丢弃 —— 否则最早的那条会天天把信发到凌晨。)
+    #    手动 workflow_dispatch 不受影响, 任何时候都能补发。
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        now = datetime.now(BEIJING_TZ)
+        if now.hour < 8:
+            print(f"[WAIT] 北京时间 {now:%H:%M} 早于 08:00 → 让给更晚的定时, 本次不发")
+            return 0
+
     # 1. 拉数据 (东财优先, 腾讯备用)
     cyb_dates, cyb_closes, hdl_dates, hdl_closes = fetch_index(
         CYB_SECID, "sz399006", HDL_SECID, "sh000922")
