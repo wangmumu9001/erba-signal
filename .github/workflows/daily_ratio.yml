@@ -1,10 +1,22 @@
 name: 二八择时日报
 
-# 每天北京时间 16:00 (UTC 08:00) 发送, 周一至周五; A股休市由脚本自动跳过
+# 触发方式(两条并存, 靠幂等去重保证同一交易日只发一封):
+#   1) 外部定时器(推荐) —— 交易日北京 08:00 调 workflow_dispatch, 秒级启动, 时间精确
+#   2) 兜底 schedule —— GitHub 自带定时有数小时延迟(实测约 5h), 仅作外部定时器失效时的备份
+#
+# 数据口径: 脚本取"最新交易日"K线。早间(开盘前)运行时, 最新K线即上一交易日,
+#           正是当日开盘操作要用的信号; 长假期间数据日期不变, 由去重自动跳过。
 on:
   schedule:
-    - cron: '0 8 * * 1-5'
+    - cron: '30 0 * * 1-5'   # 北京 08:30 (GitHub 实际会推迟数小时, 仅作兜底)
   workflow_dispatch:
+
+permissions:
+  contents: write   # 需写回 email/sent_dates.txt (去重标记)
+
+concurrency:
+  group: daily-mail
+  cancel-in-progress: false
 
 jobs:
   send-ratio-email:
@@ -13,6 +25,8 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}   # 检到分支而非 detached HEAD, 否则后续 push 失败
 
       - name: 配置 Python
         uses: actions/setup-python@v5
@@ -21,8 +35,15 @@ jobs:
 
       - name: 生成并发送邮件 (纯标准库, 无需安装依赖)
         env:
-          MAIL_FORCE_DATE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}  # 手动触发=强制用最新交易日发测试信
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_AUTH_CODE: ${{ secrets.MAIL_AUTH_CODE }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
         run: python email/send_ratio_email.py
+
+      - name: 写回已发送记录 (幂等去重标记)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add email/sent_dates.txt
+          git diff --cached --quiet || git commit -m "chore: 记录已发送日期 $(TZ=Asia/Shanghai date +%F)"
+          git push

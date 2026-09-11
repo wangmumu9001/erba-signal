@@ -34,7 +34,14 @@ THR_HI = 0.6   # 防守触发
 THR_LO = 0.4   # 进攻触发
 FLOOR = 0.30   # 渐进加仓满配点
 
+# 最新K线距今天超过此天数, 视为数据源异常(取12以覆盖春节等长假)
+MAX_STALE_DAYS = 12
+
 BEIJING_TZ = timezone(timedelta(hours=8))  # 北京时间
+
+# 幂等去重: 记录每个"已发送邮件"对应的数据日期, 保证同一数据日期的信一天至多一封
+# (cron 迟到、手动补发等重复触发时, 命中记录即跳过, 不再轰炸收件人)
+SENT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sent_dates.txt")
 
 
 # ---------------- 数据获取 (东财优先, 腾讯备用) ----------------
@@ -189,6 +196,22 @@ def send_mail(from_addr: str, auth_code: str, to_addrs: list[str],
         server.quit()
 
 
+# ---------------- 幂等去重 ----------------
+def already_sent(sent_file: str, data_date: str) -> bool:
+    """该数据日期的信是否已发送过(sent_dates.txt 每行一个日期)"""
+    try:
+        with open(sent_file, encoding="utf-8") as f:
+            return data_date in {ln.strip() for ln in f if ln.strip()}
+    except FileNotFoundError:
+        return False
+
+
+def mark_sent(sent_file: str, data_date: str) -> None:
+    """发送成功后记录该数据日期"""
+    with open(sent_file, "a", encoding="utf-8") as f:
+        f.write(data_date + "\n")
+
+
 # ---------------- 主流程 ----------------
 def main() -> int:
     # 1. 拉数据 (东财优先, 腾讯备用)
@@ -204,17 +227,27 @@ def main() -> int:
     now_bj = datetime.now(BEIJING_TZ)
     today_str = now_bj.strftime("%Y-%m-%d")
 
-    # 3. 判断是否交易日: 最新K线日期 == 今天
-    #    设置环境变量 MAIL_FORCE_DATE=1 可跳过检测, 强制用最新交易日数据(用于测试预览)
+    # 3. 取最新交易日数据
+    #    早间(开盘前)运行时, 最新K线即上一交易日 —— 这正是当日操作要用的信号
+    #    仅当最新K线过于陈旧(疑似数据源异常)才跳过; 重复发送由 sent_dates.txt 幂等去重兜底
     latest_date = cyb_dates[-1]
-    force_date = os.environ.get("MAIL_FORCE_DATE", "").strip()
-    if force_date:
-        print(f"[FORCE] 跳过交易日检测, 用最新交易日 {latest_date} 的数据")
-        today_str = latest_date  # 用最新交易日作为标题日期
-        now_bj = datetime.strptime(latest_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)  # 星期也按该交易日
-    elif latest_date != today_str:
-        print(f"最新K线日期 {latest_date}, 今天 {today_str} → 非交易日(或数据未更新), 跳过发送")
+    try:
+        latest_dt = datetime.strptime(latest_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+    except ValueError:
+        print(f"[WARN] 最新K线日期格式异常: {latest_date} → 跳过发送")
         return 0
+
+    stale_days = (now_bj.date() - latest_dt.date()).days
+    if stale_days < 0:
+        print(f"[WARN] 最新K线 {latest_date} 晚于今天 {now_bj.date()}, 数据异常 → 跳过发送")
+        return 0
+    if stale_days > MAX_STALE_DAYS:
+        print(f"[WARN] 最新K线 {latest_date} 距今 {stale_days} 天, 疑似数据源异常 → 跳过发送")
+        return 0
+
+    # 邮件按该交易日呈现 (早间发出的即上一交易日收盘信号)
+    today_str = latest_date
+    now_bj = latest_dt
 
     # 4. 计算指标
     closes_zip = list(zip(cyb_closes, hdl_closes))
@@ -259,9 +292,16 @@ def main() -> int:
         return 0
 
     to_addrs = [a.strip() for a in to_str.split(",") if a.strip()]
+
+    # 幂等去重: 该数据日期的信已发过 → 跳过 (保证重复触发也不重复发信)
+    if already_sent(SENT_FILE, today_str):
+        print(f"[DEDUP] {today_str} 的日报已发送过, 跳过本次(如需强制重发, 删 sent_dates.txt 中对应行)")
+        return 0
+
     try:
         send_mail(from_addr, auth_code, to_addrs, subject, body)
-        print(f"✅ 邮件已发送 → {to_addrs}")
+        mark_sent(SENT_FILE, today_str)
+        print(f"✅ 邮件已发送 → {to_addrs} (已记录 {today_str}, 防重复)")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
         return 1
