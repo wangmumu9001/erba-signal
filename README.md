@@ -6,7 +6,7 @@
 
 | 时间 (北京) | 内容 | 脚本 |
 |---|---|---|
-| 16:00 周一~五 | 邮件 → QQ邮箱 | `email/send_ratio_email.py` |
+| 16:00~17:00 周一~五 | 邮件 → QQ邮箱 (当天收盘数据) | `email/send_ratio_email.py` |
 | 16:05 周一~五 | 更新数据并部署 GitHub Pages | `generate_data.py` + `update_page.yml` |
 
 - 网页地址: `https://<owner>.github.io/<repo>/` (本仓库根目录 `index.html` + `data.json`)

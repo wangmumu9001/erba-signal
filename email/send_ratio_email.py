@@ -34,9 +34,6 @@ THR_HI = 0.6   # 防守触发
 THR_LO = 0.4   # 进攻触发
 FLOOR = 0.30   # 渐进加仓满配点
 
-# 最新K线距今天超过此天数, 视为数据源异常(取12以覆盖春节等长假)
-MAX_STALE_DAYS = 12
-
 BEIJING_TZ = timezone(timedelta(hours=8))  # 北京时间
 
 # 幂等去重: 记录每个"已发送邮件"对应的数据日期, 保证同一数据日期的信一天至多一封
@@ -214,16 +211,6 @@ def mark_sent(sent_file: str, data_date: str) -> None:
 
 # ---------------- 主流程 ----------------
 def main() -> int:
-    # 0. 定时阶梯闸门 —— schedule 触发若早于北京 08:00, 直接跳过, 让给当天更晚的那条定时。
-    #    (GitHub 的 cron 会推迟数小时才启动, 阶梯靠这道闸门把"第一个过了 8 点"的那次留下;
-    #     落在 8 点前的会被丢弃 —— 否则最早的那条会天天把信发到凌晨。)
-    #    手动 workflow_dispatch 不受影响, 任何时候都能补发。
-    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
-        now = datetime.now(BEIJING_TZ)
-        if now.hour < 8:
-            print(f"[WAIT] 北京时间 {now:%H:%M} 早于 08:00 → 让给更晚的定时, 本次不发")
-            return 0
-
     # 1. 拉数据 (东财优先, 腾讯备用)
     cyb_dates, cyb_closes, hdl_dates, hdl_closes = fetch_index(
         CYB_SECID, "sz399006", HDL_SECID, "sh000922")
@@ -237,27 +224,17 @@ def main() -> int:
     now_bj = datetime.now(BEIJING_TZ)
     today_str = now_bj.strftime("%Y-%m-%d")
 
-    # 3. 取最新交易日数据
-    #    早间(开盘前)运行时, 最新K线即上一交易日 —— 这正是当日操作要用的信号
-    #    仅当最新K线过于陈旧(疑似数据源异常)才跳过; 重复发送由 sent_dates.txt 幂等去重兜底
+    # 3. 只在收盘后发送当天数据
+    #    - 最新K线不是今天 → 今天还没收盘(或休市), 不发
+    #    - 北京时间 15:10 前 → 收盘数据尚未就绪, 不发
+    #    重复发送由 sent_dates.txt 幂等去重兜底
     latest_date = cyb_dates[-1]
-    try:
-        latest_dt = datetime.strptime(latest_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-    except ValueError:
-        print(f"[WARN] 最新K线日期格式异常: {latest_date} → 跳过发送")
+    if latest_date != today_str:
+        print(f"[SKIP] 最新K线 {latest_date} 不是今天({today_str}), 未收盘或休市 → 不发")
         return 0
-
-    stale_days = (now_bj.date() - latest_dt.date()).days
-    if stale_days < 0:
-        print(f"[WARN] 最新K线 {latest_date} 晚于今天 {now_bj.date()}, 数据异常 → 跳过发送")
+    if (now_bj.hour, now_bj.minute) < (15, 10):
+        print(f"[SKIP] 北京时间 {now_bj:%H:%M} 未到 15:10, 当天尚未收盘 → 不发")
         return 0
-    if stale_days > MAX_STALE_DAYS:
-        print(f"[WARN] 最新K线 {latest_date} 距今 {stale_days} 天, 疑似数据源异常 → 跳过发送")
-        return 0
-
-    # 邮件按该交易日呈现 (早间发出的即上一交易日收盘信号)
-    today_str = latest_date
-    now_bj = latest_dt
 
     # 4. 计算指标
     closes_zip = list(zip(cyb_closes, hdl_closes))
