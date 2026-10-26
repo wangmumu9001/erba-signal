@@ -224,17 +224,19 @@ def main() -> int:
     now_bj = datetime.now(BEIJING_TZ)
     today_str = now_bj.strftime("%Y-%m-%d")
 
-    # 3. 只在收盘后发送当天数据
-    #    - 最新K线不是今天 → 今天还没收盘(或休市), 不发
-    #    - 北京时间 15:10 前 → 收盘数据尚未就绪, 不发
-    #    重复发送由 sent_dates.txt 幂等去重兜底
+    # 3. 只在最新K线已收盘后发送
+    #    - 数据日期晚于今天 → 数据异常, 不发
+    #    - 数据日期就是今天 → 必须已过 15:10
+    #    - 数据日期早于今天 → 最近一个历史交易日, 视为已收盘
+    #      (GitHub cron 延迟跨日时仍可补发该交易日日报, 重复由 sent_dates.txt 兜底)
     latest_date = cyb_dates[-1]
-    if latest_date != today_str:
-        print(f"[SKIP] 最新K线 {latest_date} 不是今天({today_str}), 未收盘或休市 → 不发")
+    if latest_date > today_str:
+        print(f"[SKIP] 最新K线 {latest_date} 晚于今天({today_str}), 数据异常 → 不发")
         return 0
-    if (now_bj.hour, now_bj.minute) < (15, 10):
+    if latest_date == today_str and (now_bj.hour, now_bj.minute) < (15, 10):
         print(f"[SKIP] 北京时间 {now_bj:%H:%M} 未到 15:10, 当天尚未收盘 → 不发")
         return 0
+    data_date = latest_date
 
     # 4. 计算指标
     closes_zip = list(zip(cyb_closes, hdl_closes))
@@ -256,11 +258,11 @@ def main() -> int:
     w_original, _ = strategy_signal(ratios, 0.20)
     w_clear, _ = strategy_signal(ratios, 0.00)
 
-    # 5. 生成邮件
-    weekday_cn = "一二三四五六日"[now_bj.weekday()]
+    # 5. 生成邮件 (日期一律用数据日期, 跨日补发时不会写错)
+    weekday_cn = "一二三四五六日"[datetime.strptime(data_date, "%Y-%m-%d").weekday()]
     body = build_email_body(cyb, hdl, ratio, ratio_chg, pct_1y, pct_3y, pct_all,
-                            ma20, w_original, w_clear, today_str, weekday_cn)
-    subject = f"【二八择时日报】{today_str} · 比值 {ratio:.3f}"
+                            ma20, w_original, w_clear, data_date, weekday_cn)
+    subject = f"【二八择时日报】{data_date} · 比值 {ratio:.3f}"
 
     # 6. 发送 或 dry-run
     from_addr = os.environ.get("MAIL_FROM", "").strip()
@@ -281,14 +283,14 @@ def main() -> int:
     to_addrs = [a.strip() for a in to_str.split(",") if a.strip()]
 
     # 幂等去重: 该数据日期的信已发过 → 跳过 (保证重复触发也不重复发信)
-    if already_sent(SENT_FILE, today_str):
-        print(f"[DEDUP] {today_str} 的日报已发送过, 跳过本次(如需强制重发, 删 sent_dates.txt 中对应行)")
+    if already_sent(SENT_FILE, data_date):
+        print(f"[DEDUP] {data_date} 的日报已发送过, 跳过本次(如需强制重发, 删 sent_dates.txt 中对应行)")
         return 0
 
     try:
         send_mail(from_addr, auth_code, to_addrs, subject, body)
-        mark_sent(SENT_FILE, today_str)
-        print(f"✅ 邮件已发送 → {to_addrs} (已记录 {today_str}, 防重复)")
+        mark_sent(SENT_FILE, data_date)
+        print(f"✅ 邮件已发送 → {to_addrs} (已记录 {data_date}, 防重复)")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
         return 1
