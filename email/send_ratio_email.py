@@ -140,7 +140,8 @@ def build_email_body(cyb: float, hdl: float, ratio: float, ratio_chg: float,
     # 状态判定(按当前比值区间 + 策略实际权重)
     if ratio > THR_HI:
         zone = "🔴 防守区间"
-        tip = f"比值处于高位(>0.6), 按策略应清仓/减仓创业板(当前{1-w_clear:.0%}红利防守)。"
+        tip = (f"比值处于高位(>0.6), 按策略应清仓/减仓创业板"
+               f"(清仓版当前 {1-w_clear:.0%} 红利, 原版当前 {1-w_original:.0%} 红利)。")
     elif ratio < THR_LO:
         zone = "🟢 进攻区间"
         tip = f"比值处于低位(<0.4), 策略处于进攻状态, 已持有创业板{w_clear*100:.0f}%(随比值下降渐进加仓中)。"
@@ -214,11 +215,19 @@ def main() -> int:
     # 1. 拉数据 (东财优先, 腾讯备用)
     cyb_dates, cyb_closes, hdl_dates, hdl_closes = fetch_index(
         CYB_SECID, "sz399006", HDL_SECID, "sh000922")
-    if len(cyb_dates) != len(hdl_dates):
-        print("[WARN] 两指数K线数量不一致, 取较小值对齐")
-        n = min(len(cyb_dates), len(hdl_dates))
-        cyb_dates, cyb_closes = cyb_dates[-n:], cyb_closes[-n:]
-        hdl_dates, hdl_closes = hdl_dates[-n:], hdl_closes[-n:]
+    # 按日期取交集对齐 (不能按长度截断: 任一指数缺一天都会让后续日期整体错位)
+    cyb_map = dict(zip(cyb_dates, cyb_closes))
+    hdl_map = dict(zip(hdl_dates, hdl_closes))
+    common = sorted(set(cyb_map) & set(hdl_map))
+    if not common:
+        print("[ERROR] 两指数无共同交易日, 无法计算比值")
+        return 1
+    if len(common) != len(cyb_dates) or len(common) != len(hdl_dates):
+        print(f"[WARN] 两指数日期不一致: 创业板{len(cyb_dates)}根 / 红利{len(hdl_dates)}根, "
+              f"按共同交易日 {len(common)} 根对齐 "
+              f"(创业板缺 {len(cyb_dates)-len(common)} 天, 红利缺 {len(hdl_dates)-len(common)} 天)")
+    cyb_dates, cyb_closes = common, [cyb_map[d] for d in common]
+    hdl_dates, hdl_closes = common, [hdl_map[d] for d in common]
 
     # 2. 北京时间"今天"
     now_bj = datetime.now(BEIJING_TZ)
@@ -229,14 +238,20 @@ def main() -> int:
     #    - 数据日期就是今天 → 必须已过 15:10
     #    - 数据日期早于今天 → 最近一个历史交易日, 视为已收盘
     #      (GitHub cron 延迟跨日时仍可补发该交易日日报, 重复由 sent_dates.txt 兜底)
+    #    设置 MAIL_FORCE_DATE=1 可跳过检测, 强制用最新交易日数据(用于测试预览)
     latest_date = cyb_dates[-1]
-    if latest_date > today_str:
+    force_date = os.environ.get("MAIL_FORCE_DATE", "").strip().lower() in ("1", "true", "yes")
+    if force_date:
+        print(f"[FORCE] 跳过收盘检测, 用最新交易日 {latest_date} 的数据")
+    elif latest_date > today_str:
         print(f"[SKIP] 最新K线 {latest_date} 晚于今天({today_str}), 数据异常 → 不发")
         return 0
-    if latest_date == today_str and (now_bj.hour, now_bj.minute) < (15, 10):
+    elif latest_date == today_str and (now_bj.hour, now_bj.minute) < (15, 10):
         print(f"[SKIP] 北京时间 {now_bj:%H:%M} 未到 15:10, 当天尚未收盘 → 不发")
         return 0
-    data_date = latest_date
+    # 标题/正文/去重统一用数据日期, 补发时不会写错日期
+    today_str = latest_date
+    now_bj = datetime.strptime(today_str, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
 
     # 4. 计算指标
     closes_zip = list(zip(cyb_closes, hdl_closes))
@@ -258,11 +273,11 @@ def main() -> int:
     w_original, _ = strategy_signal(ratios, 0.20)
     w_clear, _ = strategy_signal(ratios, 0.00)
 
-    # 5. 生成邮件 (日期一律用数据日期, 跨日补发时不会写错)
-    weekday_cn = "一二三四五六日"[datetime.strptime(data_date, "%Y-%m-%d").weekday()]
+    # 5. 生成邮件
+    weekday_cn = "一二三四五六日"[now_bj.weekday()]
     body = build_email_body(cyb, hdl, ratio, ratio_chg, pct_1y, pct_3y, pct_all,
-                            ma20, w_original, w_clear, data_date, weekday_cn)
-    subject = f"【二八择时日报】{data_date} · 比值 {ratio:.3f}"
+                            ma20, w_original, w_clear, today_str, weekday_cn)
+    subject = f"【二八择时日报】{today_str} · 比值 {ratio:.3f}"
 
     # 6. 发送 或 dry-run
     from_addr = os.environ.get("MAIL_FROM", "").strip()
@@ -283,14 +298,14 @@ def main() -> int:
     to_addrs = [a.strip() for a in to_str.split(",") if a.strip()]
 
     # 幂等去重: 该数据日期的信已发过 → 跳过 (保证重复触发也不重复发信)
-    if already_sent(SENT_FILE, data_date):
-        print(f"[DEDUP] {data_date} 的日报已发送过, 跳过本次(如需强制重发, 删 sent_dates.txt 中对应行)")
+    if already_sent(SENT_FILE, today_str):
+        print(f"[DEDUP] {today_str} 的日报已发送过, 跳过本次(如需强制重发, 删 sent_dates.txt 中对应行)")
         return 0
 
     try:
         send_mail(from_addr, auth_code, to_addrs, subject, body)
-        mark_sent(SENT_FILE, data_date)
-        print(f"✅ 邮件已发送 → {to_addrs} (已记录 {data_date}, 防重复)")
+        mark_sent(SENT_FILE, today_str)
+        print(f"✅ 邮件已发送 → {to_addrs} (已记录 {today_str}, 防重复)")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
         return 1
