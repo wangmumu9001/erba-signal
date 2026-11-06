@@ -14,6 +14,7 @@
 import os
 import sys
 import json
+import traceback
 import smtplib
 import urllib.request
 import urllib.parse
@@ -186,12 +187,19 @@ def send_mail(from_addr: str, auth_code: str, to_addrs: list[str],
     msg["Subject"] = Header(subject, "utf-8")
 
     # QQ邮箱 SMTP SSL 465
+    print("[SMTP] 连接 smtp.qq.com:465 ...", flush=True)
     server = smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30)
     try:
+        print("[SMTP] 已连接, 登录中 ...", flush=True)
         server.login(from_addr, auth_code)
+        print("[SMTP] 登录成功, 投递中 ...", flush=True)
         server.sendmail(from_addr, to_addrs, msg.as_string())
+        print("[SMTP] 投递成功", flush=True)
     finally:
-        server.quit()
+        try:
+            server.quit()
+        except Exception as e:  # 别让 quit 的异常掩盖真实错误
+            print(f"[SMTP] quit 异常: {type(e).__name__}: {e}", flush=True)
 
 
 # ---------------- 幂等去重 ----------------
@@ -307,6 +315,7 @@ def main() -> int:
         mark_sent(SENT_FILE, today_str)
         print(f"✅ 邮件已发送 → {to_addrs} (已记录 {today_str}, 防重复)")
     except Exception as e:
+        traceback.print_exc()
         print(f"❌ 发送失败: {e}")
         return 1
     return 0
