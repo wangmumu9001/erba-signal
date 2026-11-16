@@ -14,14 +14,18 @@
 import os
 import sys
 import json
+import tempfile
 import traceback
 import smtplib
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 from email.header import Header
 from email.utils import formataddr
+from html import escape as html_escape
 
 # ---------------- 常量 ----------------
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -75,7 +79,7 @@ def fetch_tx(tx_code: str):
     rows = {}
     base = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     for start, end in segments:
-        param = f"{tx_code},day,{start},{end},1000,qfq"
+        param = f"{tx_code},day,{start},{end},2000,qfq"
         req = urllib.request.Request(
             base + "?" + urllib.parse.urlencode({"param": param}),
             headers={"User-Agent": UA})
@@ -178,10 +182,118 @@ def build_email_body(cyb: float, hdl: float, ratio: float, ratio_chg: float,
     return "\n".join(lines)
 
 
+# ---------------- 比值走势图 ----------------
+def build_ratio_chart(dates: list[str], ratios: list[float], out_path: str) -> bool:
+    """用每日比值序列生成全历史走势图 PNG, 成功返回 True (失败不阻断发信)"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from matplotlib import font_manager
+    except ImportError as e:
+        print(f"[WARN] 未安装 matplotlib({e}), 跳过走势图")
+        return False
+
+    # 中文字体: runner 未必有 CJK 字体, 找不到就用英文标签, 避免方块字
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    cjk = next((n for n in ("Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
+                            "Noto Sans CJK JP", "PingFang SC", "PingFang HK",
+                            "Hiragino Sans GB", "Heiti SC", "STHeiti", "SimHei",
+                            "Microsoft YaHei", "WenQuanYi Zen Hei",
+                            "WenQuanYi Micro Hei", "Songti SC", "Arial Unicode MS")
+                if n in installed), None)
+    if cjk:
+        plt.rcParams["font.sans-serif"] = [cjk, "DejaVu Sans"]
+        plt.rcParams["axes.unicode_minus"] = False
+        txt = {"title": "创业板指 / 中证红利 比值走势", "ratio": "比值",
+               "ma": "MA20", "hi": "防守线 0.6", "lo": "进攻线 0.4", "cur": "当前"}
+    else:
+        print("[WARN] 未找到中文字体, 图表标签改用英文")
+        txt = {"title": "ChiNext / CSI Dividend Ratio", "ratio": "Ratio",
+               "ma": "MA20", "hi": "Defense 0.6", "lo": "Attack 0.4", "cur": "Now"}
+
+    xs = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
+    ma20, acc = [], 0.0
+    for i, v in enumerate(ratios):
+        acc += v
+        if i >= 20:
+            acc -= ratios[i - 20]
+        ma20.append(acc / min(i + 1, 20))
+
+    fig, ax = plt.subplots(figsize=(9.6, 4.0), dpi=150)
+    ax.axhspan(THR_LO, THR_HI, color="#dbe9ff", alpha=0.35, zorder=0)
+    ax.plot(xs, ratios, color="#1f5fd0", lw=1.0, label=txt["ratio"], zorder=3)
+    ax.plot(xs, ma20, color="#8a8a8a", lw=1.0, label=txt["ma"], zorder=2)
+    ax.axhline(THR_HI, color="#d9534f", ls="--", lw=1.0, zorder=1)
+    ax.axhline(THR_LO, color="#2e9e5b", ls="--", lw=1.0, zorder=1)
+    # 阈值标签放在绘图区右侧外, 避免压住曲线
+    ax.text(1.01, THR_HI, txt["hi"], color="#d9534f", fontsize=8,
+            transform=ax.get_yaxis_transform(), ha="left", va="center", clip_on=False)
+    ax.text(1.01, THR_LO, txt["lo"], color="#2e9e5b", fontsize=8,
+            transform=ax.get_yaxis_transform(), ha="left", va="center", clip_on=False)
+    ax.scatter([xs[-1]], [ratios[-1]], color="#1f5fd0", s=20, zorder=4)
+    ax.annotate(f"{txt['cur']} {ratios[-1]:.3f}\n{dates[-1]}",
+                xy=(xs[-1], ratios[-1]), xytext=(-90, 26), textcoords="offset points",
+                fontsize=8, color="#1f5fd0",
+                arrowprops=dict(arrowstyle="->", color="#1f5fd0", lw=0.8))
+
+    ax.set_title(txt["title"], fontsize=12, pad=10)
+    ax.set_ylabel(txt["ratio"], fontsize=9)
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.grid(axis="y", alpha=0.25)
+    ax.set_xlim(xs[0], xs[-1])
+    lo, hi = min(min(ratios), THR_LO), max(max(ratios), THR_HI)
+    pad = (hi - lo) * 0.06
+    ax.set_ylim(lo - pad, hi + pad)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.legend(loc="upper left", fontsize=8, frameon=False)
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def build_email_html(plain_body: str, has_chart: bool) -> str:
+    """纯文本正文 → HTML 版正文 (图表以 cid:ratio_chart 内嵌)"""
+    first, _, rest = plain_body.partition("\n")
+    chart = ('<div style="margin:14px 0">'
+             '<img src="cid:ratio_chart" alt="创业板/中证红利比值走势" '
+             'style="width:100%;max-width:820px;height:auto;border:0"></div>'
+             ) if has_chart else ""
+    return (
+        '<!DOCTYPE html><html><body style="margin:0;padding:18px;background:#f6f7f9">'
+        '<div style="max-width:860px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;'
+        'border-radius:10px;padding:20px 24px">'
+        f'<h2 style="margin:0 0 6px;font-size:18px;color:#1f2937">{html_escape(first)}</h2>'
+        f'{chart}'
+        '<div style="font-family:Menlo,Consolas,\'Courier New\',monospace;font-size:13px;'
+        f'line-height:1.65;color:#1f2937;white-space:pre-wrap">{html_escape(rest)}</div>'
+        '</div></body></html>'
+    )
+
+
 # ---------------- 邮件发送 ----------------
 def send_mail(from_addr: str, auth_code: str, to_addrs: list[str],
-              subject: str, body: str) -> None:
-    msg = MIMEText(body, "plain", "utf-8")
+              subject: str, body: str, html_body: str | None = None,
+              chart_path: str | None = None) -> None:
+    if html_body:
+        msg = MIMEMultipart("related")
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body, "plain", "utf-8"))
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+        msg.attach(alt)
+        if chart_path and os.path.exists(chart_path):
+            with open(chart_path, "rb") as f:
+                img = MIMEImage(f.read(), _subtype="png")
+            img.add_header("Content-ID", "<ratio_chart>")
+            img.add_header("Content-Disposition", "inline", filename="ratio_chart.png")
+            msg.attach(img)
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
     msg["From"] = formataddr((str(Header("二八择时日报", "utf-8")), from_addr))
     msg["To"] = ", ".join(to_addrs)
     msg["Subject"] = Header(subject, "utf-8")
@@ -287,6 +399,18 @@ def main() -> int:
                             ma20, w_original, w_clear, today_str, weekday_cn)
     subject = f"【二八择时日报】{today_str} · 比值 {ratio:.3f}"
 
+    # 走势图: 用同一份每日比值序列现场生成, 失败不影响文字邮件
+    chart_path = None
+    try:
+        chart_dir = tempfile.mkdtemp(prefix="erba_chart_")
+        p = os.path.join(chart_dir, "ratio_chart.png")
+        if build_ratio_chart(cyb_dates, ratios, p):
+            chart_path = p
+            print(f"[图表] 已生成 {p} ({os.path.getsize(p) // 1024} KB)")
+    except Exception as e:
+        print(f"[WARN] 走势图生成失败: {type(e).__name__}: {e} (邮件将不带图)")
+    body_html = build_email_html(body, has_chart=bool(chart_path))
+
     # 6. 发送 或 dry-run
     from_addr = os.environ.get("MAIL_FROM", "").strip()
     auth_code = os.environ.get("MAIL_AUTH_CODE", "").strip()
@@ -300,6 +424,12 @@ def main() -> int:
         print("-" * 60)
         print(body)
         print("=" * 60)
+        if chart_path:
+            preview = os.path.join(os.path.dirname(chart_path), "email_preview.html")
+            with open(preview, "w", encoding="utf-8") as f:
+                f.write(body_html.replace("cid:ratio_chart", "ratio_chart.png"))
+            print(f"[DRY-RUN] 走势图: {chart_path}")
+            print(f"[DRY-RUN] HTML 预览: {preview}")
         print("提示: 配置 MAIL_FROM / MAIL_AUTH_CODE / MAIL_TO 环境变量后即真实发送")
         return 0
 
@@ -311,7 +441,8 @@ def main() -> int:
         return 0
 
     try:
-        send_mail(from_addr, auth_code, to_addrs, subject, body)
+        send_mail(from_addr, auth_code, to_addrs, subject, body,
+                  html_body=body_html, chart_path=chart_path)
         mark_sent(SENT_FILE, today_str)
         print(f"✅ 邮件已发送 → {to_addrs} (已记录 {today_str}, 防重复)")
     except Exception as e:
